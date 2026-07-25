@@ -5,3 +5,14 @@ build/
 .DS_Store
 *.log
 .claude/
+
+# 매일 재생성되는 결과물 (스크립트로 다시 만들 수 있음)
+charts/
+뉴스와이슈/이미지_*/
+뉴스와이슈/초안_*.html
+뉴스와이슈/초안_*.md
+뉴스와이슈/판단로그_*.html
+뉴스와이슈/main_image_*.png
+뉴스와이슈/_temp_*
+__pycache__/
+*.pyc
