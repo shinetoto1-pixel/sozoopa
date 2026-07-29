@@ -1,87 +1,145 @@
-import yfinance as yf
+import json
+import math
+from pathlib import Path
+
 import matplotlib.pyplot as plt
-import matplotlib.font_manager as fm
+from matplotlib.patches import FancyBboxPatch
 
 plt.rcParams["font.family"] = "Malgun Gothic"
 plt.rcParams["axes.unicode_minus"] = False
 
+# --- palette (dataviz skill reference palette, light mode) ---
+SURFACE_PAGE = "#f9f9f7"
+SURFACE_TILE = "#fcfcfb"
+INK_PRIMARY = "#0b0b0b"
+INK_SECONDARY = "#52514e"
+INK_MUTED = "#898781"
+BORDER = (0.043, 0.043, 0.043, 0.10)  # rgba(11,11,11,0.10)
+UP_COLOR = "#e34948"    # diverging red (상승)
+DOWN_COLOR = "#2a78d6"  # diverging blue (하락)
+FLAT_COLOR = "#898781"
 
-def fetch(ticker):
-    df = yf.download(ticker, period="5d", progress=False)
-    last = df["Close"].iloc[-1].item()
-    prev = df["Close"].iloc[-2].item()
-    chg = (last - prev) / prev * 100
-    return last, chg
+SECTION_ORDER = ["증시", "환율", "금리", "원자재"]
+SECTION_ACCENTS = {
+    "증시": "#2a78d6",   # blue
+    "환율": "#1baf7a",   # aqua
+    "금리": "#4a3aa7",   # violet
+    "원자재": "#eda100",  # yellow/amber
+}
+# 원래(첫 버전) 폭 배열 그대로 유지 — 대분류는 세로로만 쌓는다
+SECTION_COLS = {"증시": 4, "환율": 3, "금리": 3, "원자재": 4}
+
+# --- layout constants, in inches ---
+FIG_W = 9.6
+MARGIN_X = 0.32
+TOP_TITLE_H = 0.5
+SECTION_HEADER_H = 0.42
+TILE_H = 0.92
+ROW_GAP = 0.1
+TILE_GAP_X = 0.1
+SECTION_GAP = 0.26
+BOTTOM_MARGIN = 0.18
 
 
-def draw_grid(cells, ncols, out_path, title, fmt="{:,.2f}"):
-    nrows = -(-len(cells) // ncols)
-    fig, axes = plt.subplots(nrows, ncols, figsize=(3.6 * ncols, 1.6 * nrows))
-    fig.suptitle(title, fontsize=16, fontweight="bold", y=1.02)
-    axes = axes.flatten() if nrows * ncols > 1 else [axes]
+def _fmt_pct(pct):
+    sign = "+" if pct > 0 else ("" if pct < 0 else "")
+    return f"{sign}{pct:.2f}%"
 
-    for ax in axes:
-        ax.axis("off")
 
-    for ax, (name, last, chg, valfmt) in zip(axes, cells):
-        color = "red" if chg >= 0 else "blue"
-        sign = "▲" if chg >= 0 else "▼"
-        ax.add_patch(plt.Rectangle((0, 0), 1, 1, transform=ax.transAxes,
-                                    facecolor="#f5f5f5", edgecolor="#cccccc"))
-        ax.text(0.06, 0.72, name, fontsize=13, fontweight="bold", transform=ax.transAxes, va="center")
-        ax.text(0.06, 0.32, valfmt.format(last), fontsize=15, color=color, transform=ax.transAxes, va="center")
-        ax.text(0.62, 0.32, f"{sign}{abs(chg):.2f}%", fontsize=12, color=color, transform=ax.transAxes, va="center")
+def draw_tile(ax, x, y, w, h, item):
+    """Draw one stat tile: label, value, delta. (x, y) = bottom-left, in inches."""
+    box = FancyBboxPatch(
+        (x, y), w, h,
+        boxstyle="round,pad=0,rounding_size=0.05",
+        linewidth=1.0,
+        edgecolor=BORDER,
+        facecolor=SURFACE_TILE,
+    )
+    ax.add_patch(box)
 
-    for ax in axes[len(cells):]:
-        ax.set_visible(False)
+    pct = item["pct"]
+    if pct > 0:
+        color, arrow = UP_COLOR, "▲"
+    elif pct < 0:
+        color, arrow = DOWN_COLOR, "▼"
+    else:
+        color, arrow = FLAT_COLOR, "-"
 
-    plt.tight_layout()
-    plt.savefig(out_path, dpi=150, bbox_inches="tight", facecolor="white")
-    plt.close()
+    pad_x = w * 0.07
+    ax.text(x + pad_x, y + h * 0.78, item["name"], fontsize=10.5,
+            color=INK_SECONDARY, ha="left", va="center", fontweight="normal")
+    unit = item.get("unit", "")
+    value_str = f'{item["value"]}{unit}'
+    ax.text(x + pad_x, y + h * 0.46, value_str, fontsize=14.5,
+            color=INK_PRIMARY, ha="left", va="center", fontweight="bold")
+    delta_str = f'{arrow} {_fmt_pct(pct)}'
+    ax.text(x + pad_x, y + h * 0.15, delta_str, fontsize=10,
+            color=color, ha="left", va="center", fontweight="bold")
+    if item.get("date"):
+        ax.text(x + w - pad_x, y + h * 0.87, item["date"], fontsize=8,
+                color=INK_MUTED, ha="right", va="center")
+
+
+def section_height(n_items, ncols):
+    nrows = math.ceil(n_items / ncols)
+    return SECTION_HEADER_H + nrows * TILE_H + (nrows - 1) * ROW_GAP
+
+
+def draw_section(ax, x0, y_top, w, title, items, ncols):
+    """Draw one section panel with its top-left origin at (x0, y_top); returns height used."""
+    accent = SECTION_ACCENTS[title]
+    header_y = y_top - SECTION_HEADER_H
+    # 작은 액센트 바를 헤더 맨 위쪽에 얇게, 글씨와 겹치지 않게 충분한 간격을 두고 배치
+    ax.add_patch(plt.Rectangle((x0, header_y + SECTION_HEADER_H - 0.08), 0.34, 0.07,
+                                facecolor=accent, edgecolor="none"))
+    ax.text(x0, header_y + SECTION_HEADER_H * 0.32, title, fontsize=15.5,
+            color=INK_PRIMARY, ha="left", va="center", fontweight="bold")
+
+    nrows = math.ceil(len(items) / ncols)
+    tile_w = (w - TILE_GAP_X * (ncols - 1)) / ncols
+    grid_top = header_y
+
+    for i, item in enumerate(items):
+        r, c = divmod(i, ncols)
+        tx = x0 + c * (tile_w + TILE_GAP_X)
+        ty = grid_top - (r + 1) * TILE_H - r * ROW_GAP
+        draw_tile(ax, tx, ty, tile_w, TILE_H, item)
+
+    return SECTION_HEADER_H + nrows * TILE_H + (nrows - 1) * ROW_GAP
+
+
+def build_market_summary(data, out_path="charts/market_summary.png"):
+    panel_w = FIG_W - 2 * MARGIN_X  # 대분류 패널은 전체 폭을 그대로 사용
+
+    total_h = TOP_TITLE_H + BOTTOM_MARGIN
+    for title in SECTION_ORDER:
+        total_h += section_height(len(data[title]), SECTION_COLS[title])
+    total_h += SECTION_GAP * (len(SECTION_ORDER) - 1)
+
+    fig = plt.figure(figsize=(FIG_W, total_h), facecolor=SURFACE_PAGE)
+    ax = fig.add_axes([0, 0, 1, 1])
+    ax.set_xlim(0, FIG_W)
+    ax.set_ylim(0, total_h)
+    ax.set_aspect("equal")
+    ax.axis("off")
+
+    ax.text(MARGIN_X, total_h - TOP_TITLE_H * 0.55, f'{data["date"]} 시장 지표', fontsize=19,
+            color=INK_PRIMARY, fontweight="bold", ha="left", va="center")
+    ax.text(FIG_W - MARGIN_X, total_h - TOP_TITLE_H * 0.55, "다음뉴스 금융지표", fontsize=9.5,
+            color=INK_MUTED, ha="right", va="center")
+
+    cursor_y = total_h - TOP_TITLE_H
+    for title in SECTION_ORDER:
+        used = draw_section(ax, MARGIN_X, cursor_y, panel_w, title, data[title], SECTION_COLS[title])
+        cursor_y -= used + SECTION_GAP
+
+    Path(out_path).parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(out_path, dpi=160, facecolor=SURFACE_PAGE)
+    plt.close(fig)
     print("saved:", out_path)
 
 
-# 세계 주요 증시
-idx_tickers = [
-    ("다우산업", "^DJI", "{:,.2f}"),
-    ("나스닥종합", "^IXIC", "{:,.2f}"),
-    ("S&P500", "^GSPC", "{:,.2f}"),
-    ("니케이225", "^N225", "{:,.2f}"),
-    ("상해종합", "000001.SS", "{:,.2f}"),
-    ("항셍", "^HSI", "{:,.2f}"),
-    ("영국(FTSE)", "^FTSE", "{:,.2f}"),
-    ("프랑스(CAC40)", "^FCHI", "{:,.2f}"),
-    ("독일(DAX)", "^GDAXI", "{:,.2f}"),
-]
-idx_cells = []
-for name, t, fmt in idx_tickers:
-    last, chg = fetch(t)
-    idx_cells.append((name, last, chg, fmt))
-draw_grid(idx_cells, 3, "charts/world_indices.png", "세계 주요 증시 현황")
-
-# 환율 / 유가 / 금시세
-usdkrw, usdkrw_chg = fetch("KRW=X")
-usdjpy, usdjpy_chg = fetch("JPY=X")
-eurusd, eurusd_chg = fetch("EURUSD=X")
-gbpusd, gbpusd_chg = fetch("GBPUSD=X")
-cnyusd, cnyusd_chg = fetch("CNY=X")
-dxy, dxy_chg = fetch("DX-Y.NYB")
-wti, wti_chg = fetch("CL=F")
-gold, gold_chg = fetch("GC=F")
-
-jpykrw = usdkrw / usdjpy * 100
-eurkrw = usdkrw * eurusd
-cnykrw = usdkrw / cnyusd
-
-fx_cells = [
-    ("미국 USD/KRW", usdkrw, usdkrw_chg, "{:,.2f}원"),
-    ("일본 JPY(100엔)", jpykrw, usdkrw_chg - usdjpy_chg, "{:,.2f}원"),
-    ("유럽연합 EUR/KRW", eurkrw, usdkrw_chg + eurusd_chg, "{:,.2f}원"),
-    ("중국 CNY/KRW", cnykrw, usdkrw_chg - cnyusd_chg, "{:,.2f}원"),
-    ("유로/달러", eurusd, eurusd_chg, "{:,.4f}"),
-    ("파운드/달러", gbpusd, gbpusd_chg, "{:,.4f}"),
-    ("달러인덱스", dxy, dxy_chg, "{:,.2f}"),
-    ("WTI유가", wti, wti_chg, "${:,.2f}"),
-    ("국제금", gold, gold_chg, "${:,.2f}"),
-]
-draw_grid(fx_cells, 3, "charts/fx_commodity.png", "환율 · 유가 · 금시세 (국내 휘발유·국내금 제외)")
+if __name__ == "__main__":
+    with open(Path(__file__).parent / "market_data.json", encoding="utf-8") as f:
+        data = json.load(f)
+    build_market_summary(data)
