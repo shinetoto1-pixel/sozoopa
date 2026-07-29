@@ -115,7 +115,8 @@ def make_chart(code, name, count=100, out_path=None):
                              frameon=True, labelcolor=INK_MUTED)
     legend.get_frame().set_facecolor(SURFACE)  # 시작가가 높은 종목은 캔들과 겹쳐 보이던 문제 방지
     legend.get_frame().set_edgecolor("none")
-    legend.get_frame().set_alpha(0.92)
+    legend.get_frame().set_alpha(1.0)  # 완전 불투명 — 0.92라 심지가 살짝 비쳐 보이던 문제 발견돼서 수정
+    legend.set_zorder(10)  # 캔들/이평선보다 항상 위에 그려지도록 강제
 
     import matplotlib.pyplot as plt
     from matplotlib.ticker import FuncFormatter
