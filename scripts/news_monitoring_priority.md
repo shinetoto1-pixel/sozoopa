@@ -144,8 +144,25 @@ Phase 1이 지정된 모든 섹션에 대해 완전히 끝나기 전에는 Phase
   이해한다.
 
 **본문 읽는 방식 — WebFetch 병렬 사용 (2026-07-28 반영, 속도 개선)**
-- **URL 찾기(목록 페이지 열기, "새로운 뉴스" 버튼 클릭)는 지금처럼 브라우저로 한다.** 이건 실제 클릭 상호작용이 필요하고,
-  섹션당 몇 번 안 되는 고정 비용이라 속도에 큰 영향이 없다. 여기까지 바꿀 필요 없음.
+- **URL 찾기는 브라우저로 하되, "클릭 3번 + 링크 추출 3번"을 한 번의 JS 실행 안에 전부 합친다** (2026-07-29 재수정 —
+  예전엔 "고정비용이라 속도 영향 없음"이라고 했으나 실제로는 매 클릭마다 별도 도구 호출을 왕복하면 시간이 꽤 걸리는 것으로
+  확인됨). "새로운 뉴스" 버튼 클릭은 새 네트워크 요청 없이 화면 안에서 동기적으로(딜레이 없이) 바로 반영되므로, 클릭 →
+  추출 → 클릭 → 추출 → 클릭 → 추출을 순서대로 이어붙인 스크립트 하나로 3묶음을 한 번에 받아올 수 있다. 예:
+  ```javascript
+  (function(){
+    const box = /* 해당 카테고리의 "OO 주요뉴스" 박스 요소 찾기 */;
+    const getBtn = () => Array.from(box.querySelectorAll('a,button')).find(e => e.textContent.includes('새로운'));
+    const getLinks = () => Array.from(box.querySelectorAll('a[href*="v.daum.net"]')).map(a => a.href);
+    const batch1 = getLinks();
+    getBtn().click();
+    const batch2 = getLinks();
+    getBtn().click();
+    const batch3 = getLinks();
+    return {batch1, batch2, batch3};
+  })();
+  ```
+  이렇게 하면 카테고리당 도구 호출이 6~7번에서 1~2번으로 줄어든다. 버튼을 눌러도 새 API 요청이 안 잡히는 것을 fetch/XHR
+  후킹으로 확인했으므로(대신 우회할 API 엔드포인트는 못 찾음), 클릭 자체를 없앨 수는 없지만 왕복 횟수는 이렇게 줄인다.
 - **URL이 확보된 뒤, 기사 본문을 실제로 읽는 단계는 브라우저(`navigate`+`get_page_text`, 기사당 2콜) 대신
   `WebFetch`(기사당 1콜)를 쓴다.** 같은 기사를 두 방식으로 대조해본 결과 사실관계가 100% 일치했고, 오히려
   브라우저 쪽에서 글자수 제한(`max_chars`) 때문에 놓쳤던 뒷부분 내용을 WebFetch가 더 온전히 가져온 사례도 있었다.
