@@ -1,144 +1,176 @@
 import sys
-import time
-from datetime import date, timedelta
-import yfinance as yf
+from pathlib import Path
+
+import pandas as pd
+import requests
 import mplfinance as mpf
 
-# 기간별 기대 최소 봉 개수 (이것보다 적으면 데이터가 잘린 것으로 판단)
-MIN_ROWS = {
-    "1mo": 15, "3mo": 50, "6mo": 100, "1y": 200, "2y": 400,
+# 2026-07-29: 야후파이낸스(지연 문제) 대신 다음금융 API로 전환.
+# 브라우저 없이 Python requests만으로 당일자까지 정확한 OHLC를 받아온다.
+API_URL = "https://finance.daum.net/api/charts/A{code}/days?limit={limit}&adjusted=true"
+HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
 }
 
-# 2026-07-28 확인된 문제: 야후파이낸스에서 ^KS11(코스피)/^KQ11(코스닥) "지수" 티커는 개별 종목 대비
-# 최근 영업일 데이터가 며칠씩 지연되는 경우가 있음(행 개수는 충분해서 위 MIN_ROWS 검증은 통과해버림).
-# 지연이 감지되면 해당 지수를 추종하는 ETF로 대신 그린다(가격 스케일은 다르지만 등락 흐름은 사실상 동일).
-INDEX_PROXY = {
-    "^KS11": ("069500.KS", "코스피200 ETF"),
-    "^KQ11": ("229200.KS", "코스닥150 ETF"),
+# --- palette (dataviz 스킬 참고 팔레트) ---
+SURFACE = "#fcfcfb"
+INK_PRIMARY = "#0b0b0b"
+INK_MUTED = "#898781"
+GRID = "#e1e0d9"
+UP_COLOR = "#e34948"    # 상승(빨강, 한국 증시 관례)
+DOWN_COLOR = "#2a78d6"  # 하락(파랑)
+
+MAV_PERIODS = (5, 20, 60, 120)
+MAV_COLORS = {
+    5: "#008300",    # 초록
+    20: "#eb6834",   # 주황
+    60: "#4a3aa7",   # 보라
+    120: "#eda100",  # 금색
 }
+VOLUME_COLOR = "#1baf7a"  # 거래량은 상승/하락 구분 없이 이 색 하나로 통일
+DIVIDER_COLOR = "#3a3a38"  # 캔들 패널과 거래량 패널 사이 구분선(진하게)
 
 
-def _expected_last_trading_day(today=None):
-    """이 파이프라인은 항상 장 시작 전(07:30 이전)에 실행되므로, '오늘 이전 가장 최근 평일'을
-    데이터가 있어야 할 마지막 날짜로 본다. 한국 공휴일은 반영하지 않은 근사치라, 공휴일 다음날엔
-    실제로는 정상인데 지연으로 오탐될 수 있음 — 그 정도는 감수한다(경고만 찍고 차트는 정상 생성)."""
-    d = (today or date.today()) - timedelta(days=1)
-    while d.weekday() >= 5:  # 5=토, 6=일
-        d -= timedelta(days=1)
-    return d
+def _fetch_candles(code, count):
+    """count봉을 화면에 표시하되, MA120이 처음부터 유효하도록 여유(120봉)를 더 받아온다."""
+    ref = f"https://finance.daum.net/quotes/A{code}"
+    headers = {**HEADERS, "Referer": ref}
+    limit = count + max(MAV_PERIODS) + 10
+    r = requests.get(API_URL.format(code=code, limit=limit), headers=headers, timeout=15)
+    r.raise_for_status()
+    payload = r.json()
+    rows = payload["data"]
+    if len(rows) < count:
+        raise RuntimeError(f"A{code}: 데이터 부족 ({len(rows)}행, 요청 {count}행) — 종목코드 확인 필요")
+
+    df = pd.DataFrame(rows)
+    df["Date"] = pd.to_datetime(df["date"])
+    df = df.set_index("Date").sort_index()
+    df = df.rename(columns={
+        "openingPrice": "Open", "highPrice": "High", "lowPrice": "Low",
+        "tradePrice": "Close", "candleAccTradeVolume": "Volume",
+    })
+    return df[["Open", "High", "Low", "Close", "Volume"]]
 
 
-def _staleness_days(df):
-    """df의 마지막 날짜가 예상 마지막 영업일보다 며칠(영업일 기준) 뒤처져 있는지. 0이면 정상."""
-    if df is None or len(df) == 0:
-        return 999
-    last_date = df.index[-1].date()
-    expected = _expected_last_trading_day()
-    if last_date >= expected:
-        return 0
-    gap, d = 0, last_date
-    while d < expected:
-        d += timedelta(days=1)
-        if d.weekday() < 5:
-            gap += 1
-    return gap
-
-
-def _fetch(ticker, period, interval, retries=3, wait=3):
-    """데이터를 받아오되, 기대 봉 개수보다 적게 오면 재시도한다."""
-    min_rows = MIN_ROWS.get(period, 5)
-    last_df = None
-    for attempt in range(retries):
-        df = yf.download(ticker, period=period, interval=interval, progress=False)
-        if df is not None and len(df) >= min_rows:
-            return df
-        last_df = df
-        if attempt < retries - 1:
-            time.sleep(wait)
-    return last_df  # 마지막 시도 결과라도 반환 (호출부에서 부족 여부 재확인)
-
-
-def make_chart(code, name, period="6mo", interval="1d", mav=(5, 20, 60), out_path=None, _tried_alt=False):
+def make_chart(code, name, count=100, out_path=None):
     """
-    code: 종목코드.KS(코스피) 또는 .KQ(코스닥), 예) 005930.KS / 지수는 ^KS11(코스피), ^KQ11(코스닥)
-    name: 차트 제목에 쓸 이름, 예) 삼성전자
-    데이터가 부족하게 오면(레이트리밋 등) 최대 2회 재시도하고, 그래도 안 되면 반대 거래소(.KS<->.KQ)로 전환해 재시도한다.
+    code: 6자리 종목코드 (예: "000660"). 다음금융 내부적으로 "A"+코드로 조회됨.
+    name: 차트 제목에 쓸 이름 (예: "SK하이닉스")
+    count: 화면에 표시할 봉 개수 (기본 100봉)
     """
-    if code.startswith("^") or "." in code:
-        ticker = code
-    else:
-        ticker = f"{code}.KS"
+    df_full = _fetch_candles(code, count)
+    for p in MAV_PERIODS:
+        df_full[f"MA{p}"] = df_full["Close"].rolling(p).mean()
+    df = df_full.iloc[-count:].copy()
 
-    df = _fetch(ticker, period, interval)
-    min_rows = MIN_ROWS.get(period, 5)
-
-    if (df is None or len(df) < min_rows) and not _tried_alt and not code.startswith("^"):
-        # KS/KQ 반대쪽으로 한 번 더 시도
-        base = ticker.split(".")[0]
-        alt_suffix = ".KQ" if ticker.endswith(".KS") else ".KS"
-        alt_ticker = base + alt_suffix
-        alt_df = _fetch(alt_ticker, period, interval)
-        if alt_df is not None and len(alt_df) >= min_rows:
-            ticker = alt_ticker
-            df = alt_df
-
-    if df is None or len(df) < min_rows:
-        raise RuntimeError(f"{ticker}: 데이터 부족 ({0 if df is None else len(df)}행, 최소 {min_rows}행 필요) - 재시도 후에도 실패")
-
-    # --- 최신성 검증: 행 개수는 충분해도 "가장 최근 날짜"가 뒤처져 있을 수 있음 ---
-    stale_gap = _staleness_days(df)
-    if stale_gap > 0 and ticker in INDEX_PROXY:
-        proxy_ticker, proxy_label = INDEX_PROXY[ticker]
-        print(f"[경고] {ticker} 데이터가 {stale_gap}영업일 지연됨(최근 데이터: {df.index[-1].date()}). "
-              f"{proxy_ticker}({proxy_label})로 대체 시도.")
-        proxy_df = _fetch(proxy_ticker, period, interval)
-        proxy_gap = _staleness_days(proxy_df)
-        if proxy_df is not None and len(proxy_df) >= min_rows and proxy_gap < stale_gap:
-            df, ticker, stale_gap = proxy_df, proxy_ticker, proxy_gap
-            name = f"{name}({proxy_label} 대리)"
-        else:
-            print("[경고] 대리 티커도 데이터가 부족하거나 여전히 지연됨 — 원본 지수 데이터 그대로 사용.")
-
-    if stale_gap > 0:
-        print(f"[경고] {ticker} 최종 데이터가 예상보다 {stale_gap}영업일 지연됨 "
-              f"(최근 데이터: {df.index[-1].date()}, 예상 최근 영업일: {_expected_last_trading_day()}). 차트 제목에 표기함.")
-
-    df.columns = df.columns.get_level_values(0)
-    has_volume = bool(df["Volume"].sum() > 0)
-
-    mc = mpf.make_marketcolors(up="red", down="blue", edge="inherit", wick="inherit", volume="inherit")
+    mc = mpf.make_marketcolors(
+        up=UP_COLOR, down=DOWN_COLOR,
+        edge={"up": UP_COLOR, "down": DOWN_COLOR},
+        wick={"up": UP_COLOR, "down": DOWN_COLOR},
+        volume={"up": VOLUME_COLOR, "down": VOLUME_COLOR},  # 상승/하락 구분 없이 통일된 초록
+    )
     style = mpf.make_mpf_style(
-        base_mpf_style="yahoo",
+        base_mpf_style="nightclouds",
         marketcolors=mc,
+        facecolor=SURFACE,
+        figcolor=SURFACE,
+        gridcolor=GRID,
+        gridstyle="-",
+        gridaxis="both",
         rc={
             "font.family": "Malgun Gothic",
             "axes.unicode_minus": False,
-            "axes.edgecolor": "black",
-            "axes.linewidth": 1.2,
+            "axes.edgecolor": GRID,
+            "axes.labelcolor": INK_MUTED,
+            "xtick.color": INK_MUTED,
+            "ytick.color": INK_MUTED,
+            "text.color": INK_PRIMARY,
         },
     )
 
+    aps = [
+        mpf.make_addplot(df[f"MA{p}"], color=MAV_COLORS[p], width=1.3)
+        for p in MAV_PERIODS
+    ]
+
     if out_path is None:
-        out_path = f"charts/{code.replace('.', '_').replace('^', '')}.png"
+        out_path = f"charts/A{code}.png"
+    Path(out_path).parent.mkdir(parents=True, exist_ok=True)
 
-    title = f"{name} - {period} 일봉" if ticker.startswith("^") else f"{name} ({ticker}) - {period} 일봉"
-    if stale_gap > 0:
-        title += f"\n[데이터 {df.index[-1].date()} 기준 · {stale_gap}영업일 지연]"
+    title = f"{name} ({code})"
 
-    kwargs = dict(
-        type="candle", style=style, volume=has_volume,
-        mav=mav, title=title, savefig=out_path,
+    fig, axes = mpf.plot(
+        df, type="candle", style=style, volume=True,
+        addplot=aps, panel_ratios=(3, 1), title=title,
+        returnfig=True, figsize=(10, 6.2),
+        datetime_format="%m.%d", show_nontrading=False,
     )
-    if has_volume:
-        kwargs["panel_ratios"] = (3, 1)
 
-    mpf.plot(df, **kwargs)
+    legend_handles = [
+        axes[0].plot([], [], color=MAV_COLORS[p], linewidth=1.8, label=f"{p}일선")[0]
+        for p in MAV_PERIODS
+    ]
+    legend = axes[0].legend(handles=legend_handles, loc="upper left", fontsize=8,
+                             frameon=True, labelcolor=INK_MUTED)
+    legend.get_frame().set_facecolor(SURFACE)  # 시작가가 높은 종목은 캔들과 겹쳐 보이던 문제 방지
+    legend.get_frame().set_edgecolor("none")
+    legend.get_frame().set_alpha(0.92)
+
+    import matplotlib.pyplot as plt
+    from matplotlib.ticker import FuncFormatter
+
+    plain_fmt = FuncFormatter(lambda v, _: f"{v:,.0f}")
+    volume_ax = axes[2]  # [가격, 가격보조, 거래량, 거래량보조] 순서
+    for a in (axes[0], volume_ax):
+        try:
+            a.ticklabel_format(style="plain", axis="y", useOffset=False)
+        except AttributeError:
+            pass
+        a.yaxis.set_major_formatter(plain_fmt)
+        a.yaxis.offsetText.set_visible(False)
+        a.yaxis.offsetText.set_text("")
+        # y축을 오른쪽으로 — 오늘 가격/거래량을 오른쪽에서 바로 확인할 수 있게
+        a.yaxis.tick_right()
+        a.yaxis.set_label_position("right")
+        a.set_ylabel("")  # "Price"/"Volume" 글자는 안 보이는 게 어차피 아는 정보라 제거
+
+    for bar in volume_ax.patches:  # 거래량 막대 테두리 제거
+        bar.set_edgecolor("none")
+        bar.set_linewidth(0)
+
+    # 캔들 패널 ↔ 거래량 패널 사이 구분선을 진하게
+    axes[0].spines["bottom"].set_color(DIVIDER_COLOR)
+    axes[0].spines["bottom"].set_linewidth(1.6)
+    volume_ax.spines["top"].set_color(DIVIDER_COLOR)
+    volume_ax.spines["top"].set_linewidth(1.6)
+
+    # x축 맨 오른쪽(가장 최근 봉)에도 날짜가 찍히도록 강제 추가 (기존 x범위는 그대로 유지)
+    xlim = volume_ax.get_xlim()
+    last_idx = len(df) - 1
+    xticks = sorted(set(list(volume_ax.get_xticks()) + [last_idx]))
+    volume_ax.set_xticks(xticks)
+    volume_ax.set_xlim(xlim)
+
+    # 오늘 종가를 y축(오른쪽)에 별도 눈금+점선으로 표기 — "지금 얼마인지"가 바로 보이게.
+    # 기존 자동눈금 중 종가와 너무 가까워 겹치는 것은 빼고, 축 범위(ylim)도 원래대로 고정한다.
+    ylim = axes[0].get_ylim()
+    last_close = float(df["Close"].iloc[-1])
+    threshold = 0.04 * (ylim[1] - ylim[0])
+    auto_yticks = [t for t in axes[0].get_yticks() if abs(t - last_close) > threshold]
+    axes[0].axhline(last_close, color=INK_PRIMARY, linewidth=0.9, linestyle="--", alpha=0.6)
+    axes[0].set_yticks(sorted(auto_yticks + [last_close]))
+    axes[0].set_ylim(ylim)
+
+    fig.savefig(out_path, dpi=150, facecolor=SURFACE)
+    plt.close(fig)
     return out_path
 
 
 if __name__ == "__main__":
-    # 사용 예: python make_chart.py 005930.KS 삼성전자
-    code = sys.argv[1] if len(sys.argv) > 1 else "005930.KS"
+    # 사용 예: python make_chart.py 000660 SK하이닉스 [봉개수]
+    code = sys.argv[1] if len(sys.argv) > 1 else "000660"
     name = sys.argv[2] if len(sys.argv) > 2 else code
-    path = make_chart(code, name)
+    count = int(sys.argv[3]) if len(sys.argv) > 3 else 100
+    path = make_chart(code, name, count=count)
     print(f"saved: {path}")
