@@ -41,13 +41,40 @@
 
 ## 소스
 다음뉴스 (news.daum.net) — 네이버뉴스는 접속 차단되어 대체 사용
-- 경제 섹션: news.daum.net/economy
-- 사회 섹션: news.daum.net/society
-- 정치 섹션: news.daum.net/politics
-- IT/과학 섹션: news.daum.net/tech
-- 국제 섹션: news.daum.net/world
 
-각 섹션 페이지 안에 하위 카테고리별 최신 기사 목록이 함께 표시됨 (탭 이동 불필요).
+**중요 (2026-07-29 재확인 — 실제 오류 발견)**: 예전엔 "각 섹션 페이지 안에 하위 카테고리별 최신 기사 목록이 함께
+표시됨(탭 이동 불필요)"이라고 되어있었는데, 이건 틀렸다. 예를 들어 `news.daum.net/economy`(경제홈) 화면에 보이는
+"경제정책" 블록은 **4개짜리 미리보기일 뿐**이고, 실제로 하위 카테고리 탭을 클릭해서 들어가야 진짜 전체 목록
+(15개 이상)이 나온다. **탭 이동 없이 홈 화면만 보고 진행하면 우선순위1의 "전수 정독" 원칙 자체가 무너진다.**
+아래 URL로 각 하위 카테고리에 직접 들어간다 (탭 클릭 없이 바로 이동 가능):
+
+**우선순위1 — 경제정책, 산업**
+- 경제정책: news.daum.net/policy
+- 산업: news.daum.net/industry
+
+**참고사항 — 경제 하위**
+- 주식: news.daum.net/stock
+- 벤처/스타트업: news.daum.net/startup
+- 국제경제: news.daum.net/worldeconomy
+- 가상자산: news.daum.net/coin
+- 연금/노후: news.daum.net/pension
+
+**참고사항 — 사회 하위**
+- 의료보건: news.daum.net/medical
+- 재난안전: news.daum.net/safety
+
+**참고사항 — 정치 하위**
+- 외교/국방: news.daum.net/dipdefen
+- 북한: news.daum.net/north
+
+**참고사항 — 국제** (하위 카테고리 구분 없이 섹션 전체)
+- news.daum.net/world
+
+**참고사항 — IT/과학 하위**
+- AI: news.daum.net/ai-tech
+- 테크: news.daum.net/technology
+- IT기업: news.daum.net/it-tech
+- 우주: news.daum.net/universe
 
 ## 모니터링 시간대
 전일 장 마감(15:30) ~ 당일 오전 7:30 사이 발행된 기사만 대상으로 한다.
