@@ -50,7 +50,12 @@ def _fetch_candles(code, count):
         "openingPrice": "Open", "highPrice": "High", "lowPrice": "Low",
         "tradePrice": "Close", "candleAccTradeVolume": "Volume",
     })
-    return df[["Open", "High", "Low", "Close", "Volume"]]
+    df = df[["Open", "High", "Low", "Close", "Volume"]]
+    # 다음금융 API는 아직 개장 전인 당일자에 대해 거래량 0짜리 placeholder 행을 얹어서 준다
+    # (open=high=low=close=전일종가, volume=0) — 실제 봉이 아니므로 제거한다.
+    while len(df) and df["Volume"].iloc[-1] == 0:
+        df = df.iloc[:-1]
+    return df
 
 
 def make_chart(code, name, count=100, out_path=None):
